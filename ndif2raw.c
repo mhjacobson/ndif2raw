@@ -123,11 +123,8 @@ struct ndif_chunk {
 #define NDIF_CHUNK_ADC 131
 #define NDIF_CHUNK_TERMINATOR 255
 
-uint8_t *read_data(const char *const filename, size_t *const size_out) {
+uint8_t *read_data(FILE *const fp, size_t *const size_out) {
     int rv;
-
-    FILE *const fp = fopen(filename, "r");
-    assert(fp);
 
     const long orig = ftell(fp);
     assert(orig != -1);
@@ -212,12 +209,37 @@ const uint8_t *read_chunks(struct ndif_chunk *const chunks, const size_t nchunk,
 }
 
 int main(int argc, const char *argv[]) {
-    const char *const filename = argv[1];
+    if (argc != 3) {
+        fprintf(stderr, "usage:\n\tndif2raw <input NDIF path> <output raw path>\n");
+        return 1;
+    }
+
+    const char *const in_path = argv[1];
+    const char *const out_path = argv[2];
+    FILE *input, *output;
+
+    input = fopen(in_path, "r");
+
+    if (input == NULL) {
+        perror("cannot open input file");
+        return 1;
+    }
+
+    if (!strcmp(out_path, "-")) {
+        output = stdout;
+    } else {
+        output = fopen(out_path, "wx");
+
+        if (output == NULL) {
+            perror("cannot open output file");
+            return 1;
+        }
+    }
 
     size_t dsize, rsize;
     size_t n;
-    uint8_t *const dbuffer = read_data(filename, &dsize);
-    uint8_t *const rbuffer = read_resource(filename, 'bcem', 128, &rsize);
+    uint8_t *const dbuffer = read_data(input, &dsize);
+    uint8_t *const rbuffer = read_resource(in_path, 'bcem', 128, &rsize);
     const uint8_t *rbuf = rbuffer;
 
     assert(rsize >= sizeof (struct ndif_header));
@@ -291,17 +313,17 @@ int main(int argc, const char *argv[]) {
 
         switch (chunk_type) {
             case NDIF_CHUNK_ZERO:
-                n = fwrite(zero_buf, BLOCK_SIZE, 1, stdout);
+                n = fwrite(zero_buf, BLOCK_SIZE, 1, output);
                 assert(n == 1);
                 break;
             case NDIF_CHUNK_RAW:
                 assert(BLOCK_SIZE * block_offset + BLOCK_SIZE <= dsize);
-                n = fwrite(dbuffer + chunk->backing_offset + BLOCK_SIZE * block_offset, BLOCK_SIZE, 1, stdout);
+                n = fwrite(dbuffer + chunk->backing_offset + BLOCK_SIZE * block_offset, BLOCK_SIZE, 1, output);;
                 assert(n == 1);
                 break;
             default:
                 assert(BLOCK_SIZE * block_offset + BLOCK_SIZE <= chunkbuf_valid_size);
-                n = fwrite(chunkbuf + BLOCK_SIZE * block_offset, BLOCK_SIZE, 1, stdout);
+                n = fwrite(chunkbuf + BLOCK_SIZE * block_offset, BLOCK_SIZE, 1, output);
                 assert(n == 1);
         }
     }
