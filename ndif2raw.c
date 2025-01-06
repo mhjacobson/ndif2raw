@@ -208,6 +208,29 @@ const uint8_t *read_chunks(struct ndif_chunk *const chunks, const size_t nchunk,
     return buf;
 }
 
+uint32_t crc_table[256] = {0};
+void crc_build_table() {
+    // Calculate lookup table
+    for (size_t i = 0; i < 256; i++) {
+        uint32_t crc = i;
+        for (size_t j = 0; j < 8; j++) {
+            if (crc & 1) {
+                crc = (crc >> 1) ^  0x04C11DB7;
+            } else {
+                crc = (crc >> 1);
+            }
+        }
+        crc_table[i] = crc; 
+    }
+}
+uint32_t crc_calc(uint32_t crc, const uint8_t *buf, size_t buflen) {
+    // Update CRC with table
+    for (size_t i = 0; i < buflen; ++i) {
+        crc = (crc >> 8) ^ crc_table[(crc & 0xFF) ^ buf[i]];
+    }
+    return crc;
+}
+
 int main(int argc, const char *argv[]) {
     if (argc != 3) {
         fprintf(stderr, "usage:\n\tndif2raw <input NDIF path> <output raw path>\n");
@@ -269,6 +292,9 @@ int main(int argc, const char *argv[]) {
     uint8_t *const chunkbuf = malloc(chunkbuf_size);
     size_t chunkbuf_valid_size = 0;
 
+    crc_build_table();
+    uint32_t crc32 = 0xffffffff;
+
     for (uint32_t i = 0; i < header.nblock; i++) {
         bool prepare_chunk = false;
 
@@ -315,17 +341,26 @@ int main(int argc, const char *argv[]) {
             case NDIF_CHUNK_ZERO:
                 n = fwrite(zero_buf, BLOCK_SIZE, 1, output);
                 assert(n == 1);
+                crc32 = crc_calc(crc32, zero_buf, BLOCK_SIZE);
                 break;
             case NDIF_CHUNK_RAW:
                 assert(BLOCK_SIZE * block_offset + BLOCK_SIZE <= dsize);
-                n = fwrite(dbuffer + chunk->backing_offset + BLOCK_SIZE * block_offset, BLOCK_SIZE, 1, output);;
+                n = fwrite(dbuffer + chunk->backing_offset + BLOCK_SIZE * block_offset, BLOCK_SIZE, 1, output);
                 assert(n == 1);
+                crc32 = crc_calc(crc32, dbuffer + chunk->backing_offset + BLOCK_SIZE * block_offset, BLOCK_SIZE);
                 break;
             default:
                 assert(BLOCK_SIZE * block_offset + BLOCK_SIZE <= chunkbuf_valid_size);
                 n = fwrite(chunkbuf + BLOCK_SIZE * block_offset, BLOCK_SIZE, 1, output);
                 assert(n == 1);
+                crc32 = crc_calc(crc32, chunkbuf + BLOCK_SIZE * block_offset, BLOCK_SIZE);
         }
+    }
+
+    // Show a warning if the checksum doesn't match
+    if ((header.crc32 != 0) && (header.crc32 != crc32)) {
+        fprintf(stderr, "WARNING: Calculated Checksum (0x%08x) is Different from Checksum "
+                "in Header (0x%08x). The Image is Probably Corrupt.\n", crc32, header.crc32);
     }
 
     free(chunks);
