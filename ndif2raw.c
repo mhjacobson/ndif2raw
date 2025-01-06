@@ -98,6 +98,222 @@ size_t adc_decompress(const uint8_t *const src, const size_t srclen, uint8_t *co
     return dstptr - dst;
 }
 
+struct kencode_state {
+    size_t node_count;
+    const uint8_t *src_buf;
+    size_t src_bitlen;
+    size_t src_bitpos;
+};
+
+uint32_t kencode_popbits(struct kencode_state *const state, const size_t bit_len) {
+    // No bits to read -> 0.
+    if (bit_len == 0) {
+        return 0;
+    }
+
+    // Make sure we have enough bits remaining.
+    assert(bit_len <= 32);
+    assert(state->src_bitpos + bit_len <= state->src_bitlen);
+
+    // Always read 32 bits; shift/mask out the requested bits.
+    const size_t cur_bitpos = state->src_bitpos;
+    state->src_bitpos += bit_len;
+    const uint8_t *src_ptr = state->src_buf + (cur_bitpos / 8);
+    const uint32_t src_dword = (src_ptr[0] << 24) | (src_ptr[1] << 16) | (src_ptr[2] << 8) | src_ptr[3];
+    return (src_dword >> (32 - bit_len - (cur_bitpos & 7))) & (0xFFFFFFFF >> (32 - bit_len));
+}
+
+size_t kencode_decode_copy_len(struct kencode_state *const state) {
+    // Get length index (number of 1 bits, limited to 10).
+    size_t len_idx = 0;
+    while (len_idx < 10 && kencode_popbits(state, 1) != 0) {
+        len_idx += 1;
+    }
+
+    // Decode length according to index.
+    switch (len_idx) {
+        case 0:
+            return kencode_popbits(state, 1);
+        case 1:
+            if (!kencode_popbits(state, 1)) {
+                return 2;
+            } else {
+                return kencode_popbits(state, 1) + 3;
+            }
+        case 2:
+            if (kencode_popbits(state, 1)) {
+                return kencode_popbits(state, 2) + 7;
+            } else {
+                return kencode_popbits(state, 1) + 5;
+            }
+        case 3:
+            return kencode_popbits(state, 3) + 11;
+        case 4:
+            return kencode_popbits(state, 3) + 19;
+        case 5:
+            return kencode_popbits(state, 5) + 27;
+        case 6:
+            return kencode_popbits(state, 6) + 59;
+        case 7:
+            return kencode_popbits(state, 7) + 123;
+        case 8:
+            return kencode_popbits(state, 8) + 251;
+        case 9:
+            return kencode_popbits(state, 9) + 507;
+        default:
+            return kencode_popbits(state, 10) + 1019;
+    }
+}
+
+size_t kencode_decode_lit_len(struct kencode_state *const state) {
+    if (!kencode_popbits(state, 1)) {
+        return 1;
+    }
+
+    switch (kencode_popbits(state, 2)) {
+        case 0:
+            return 2;
+        case 1:
+            return 3;
+        case 2:
+            return kencode_popbits(state, 2) + 4;
+        case 3: {
+            const size_t read_bits = kencode_popbits(state, 4);
+            if (read_bits < 8) {
+                return read_bits + 8;
+            } else if (read_bits < 12) {
+                return kencode_popbits(state, 2) + (read_bits * 4) - 16;
+            } else {
+                return kencode_popbits(state, 3) + (read_bits * 8) - 64;
+            }
+        }
+        default:
+            abort();
+    }
+}
+
+size_t kencode_decode_copy_offset(struct kencode_state *const state, const size_t dst_pos) {
+    // The bit length is dependent on the position in the output buffer and the maximum node count.
+    size_t bit_len = 0;
+    if (dst_pos > 172032 && state->node_count > 131072) {
+        bit_len = 14;
+    } else if (dst_pos > 70000 && state->node_count > 65536) {
+        bit_len = 13;
+    } else if (dst_pos > 43008 && state->node_count > 32768) {
+        bit_len = 12;
+    } else if (dst_pos > 21504 && state->node_count > 16384) {
+        bit_len = 11;
+    } else if (dst_pos > 10752 && state->node_count > 8192) {
+        bit_len = 10;
+    } else if (dst_pos > 5376 && state->node_count > 4096) {
+        bit_len = 9;
+    } else if (dst_pos > 2688 && state->node_count > 2048) {
+        bit_len = 8;
+    } else if (dst_pos > 1000) {
+        bit_len = 7;
+    } else if (dst_pos > 672) {
+        bit_len = 6;
+    } else if (dst_pos > 160) {
+        bit_len = 5;
+    } else if (dst_pos > 80) {
+        bit_len = 4;
+    } else if (dst_pos > 40) {
+        bit_len = 3;
+    } else if (dst_pos > 20) {
+        bit_len = 2;
+    } else if (dst_pos > 10) {
+        bit_len = 1;
+    }
+
+    if (!kencode_popbits(state, 1)) {
+        return kencode_popbits(state, bit_len) + 1;
+    }
+
+    size_t base_len = 1 << bit_len;
+
+    if (kencode_popbits(state, 1)) {
+        base_len = 5 * base_len + 1;
+
+        if (base_len + 1 >= dst_pos) {
+            return base_len + kencode_popbits(state, 1);
+        }
+        if (base_len + 3 >= dst_pos) {
+            return base_len + kencode_popbits(state, 2);
+        }
+
+        size_t j = base_len + 3;
+
+        for (size_t i = 3; i <= (bit_len + 4); i++) {
+            j += (1U << (i - 1));
+            size_t k = (j != 1664) ? j : 1644;
+            if (k >= dst_pos || i == (bit_len + 4)) {
+                return base_len + kencode_popbits(state, i);
+            }
+        }
+    }
+
+    return base_len + kencode_popbits(state, bit_len + 2) + 1;
+}
+
+size_t kencode_decompress(const uint8_t *const src, const size_t srclen, uint8_t *const dst, const size_t dstlen) {
+    // Set up state.
+    struct kencode_state state = {0};
+    state.node_count = 10240; // The original Apple decoder always uses 10240 for NDIF-images.
+    state.src_buf = src;
+    state.src_bitlen = srclen * 8;
+    state.src_bitpos = 0;
+
+    bool allow_lit = true;
+    size_t dst_pos = 0;
+
+    // Decode loop.
+    while (dst_pos < dstlen && state.src_bitpos < state.src_bitlen) {
+        // Decode copy length (length 0 -> copy literal).
+        size_t copy_len = kencode_decode_copy_len(&state);
+
+        if (copy_len == 0 && allow_lit) {
+            // Decode literal length.
+            const size_t lit_len = kencode_decode_lit_len(&state);
+            assert(state.src_bitpos + (lit_len * 8) <= state.src_bitlen);
+
+            // Copy literal from src to dst.
+            const uint8_t *src_ptr = state.src_buf + (state.src_bitpos / 8);
+
+            if ((state.src_bitpos & 7) == 0) {
+                // If the bit position is aligned to a byte boundary, we can just use memcpy
+                memcpy(dst + dst_pos, src_ptr, lit_len);
+                dst_pos += lit_len;
+            } else {
+                // Otherwise we need to decode each byte separately
+                for (size_t i = 0; i < lit_len; i++) {
+                    const uint16_t src_word = (src_ptr[0] << 8) | src_ptr[1];
+                    src_ptr += 1;
+                    dst[dst_pos] = (src_word >> (8 - (state.src_bitpos & 7))) & 0xff;
+                    dst_pos += 1;
+                }
+            }
+
+            state.src_bitpos += lit_len * 8;
+            allow_lit = (lit_len > 62);
+        } else {
+            // Adjust copy length.
+            copy_len += (allow_lit ? 2 : 3);
+            assert(dst_pos + copy_len <= dstlen);
+
+            // Decode copy offset.
+            const size_t copy_offset = kencode_decode_copy_offset(&state, dst_pos);
+            assert(copy_offset <= dst_pos);
+
+            // Copy relative to dst_pos.
+            copy_bytes(dst + dst_pos, dst + dst_pos - copy_offset, copy_len);
+            dst_pos += copy_len;
+            allow_lit = true;
+        }
+    }
+
+    return dst_pos;
+}
+
 struct ndif_header {
     uint16_t version;
     uint16_t fsid;
@@ -121,6 +337,7 @@ struct ndif_chunk {
 
 #define NDIF_CHUNK_ZERO 0
 #define NDIF_CHUNK_RAW 2
+#define NDIF_CHUNK_KEN_CODE 128
 #define NDIF_CHUNK_ADC 131
 #define NDIF_CHUNK_TERMINATOR 255
 
@@ -291,13 +508,25 @@ int main(int argc, const char *argv[]) {
         if (prepare_chunk) {
             chunk_type = chunk->type;
 
+            // Calculate the decompressed size.
+            // The KenCode algorithm relies on the correct output size to stop decompressing.
+            size_t decomp_size = chunkbuf_size;
+            if ((chunknum + 1) < header.nchunk) {
+                decomp_size = (chunks[chunknum + 1].logical_offset - chunk->logical_offset) * BLOCK_SIZE;
+            }
+
             switch (chunk_type) {
                 case NDIF_CHUNK_ZERO:
                 case NDIF_CHUNK_RAW:
                     chunkbuf_valid_size = 0;
                     break;
+                case NDIF_CHUNK_KEN_CODE:
+                    assert(decomp_size <= chunkbuf_size);
+                    chunkbuf_valid_size = kencode_decompress(dbuffer + header.backing_offset + chunk->backing_offset, chunk->backing_size, chunkbuf, decomp_size);
+                    break;
                 case NDIF_CHUNK_ADC:
-                    chunkbuf_valid_size = adc_decompress(dbuffer + header.backing_offset + chunk->backing_offset, chunk->backing_size, chunkbuf, chunkbuf_size);
+                    assert(decomp_size <= chunkbuf_size);
+                    chunkbuf_valid_size = adc_decompress(dbuffer + header.backing_offset + chunk->backing_offset, chunk->backing_size, chunkbuf, decomp_size);
                     break;
                 case NDIF_CHUNK_TERMINATOR:
                     fprintf(stderr, "unexpectedly reached terminator chunk\n");
