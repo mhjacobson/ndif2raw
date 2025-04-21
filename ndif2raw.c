@@ -5,6 +5,7 @@
  */
 
 #include <assert.h>
+#include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -150,6 +151,7 @@ uint8_t *read_data(FILE *const fp, size_t *const size_out) {
 }
 
 // TODO: provide a non-Macintosh implementation
+#include <MacTypes.h>
 #include <CoreServices/CoreServices.h>
 uint8_t *read_resource(const char *const file, const ResType type, const ResID id, size_t *const size_out) {
     OSStatus err;
