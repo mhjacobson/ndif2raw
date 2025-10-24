@@ -1,2 +1,15 @@
-ndif2raw: ndif2raw.c
-	cc -o ndif2raw ndif2raw.c -framework CoreServices -Wno-deprecated-declarations
+all: ndif2raw
+
+clean:
+	rm -f ndif2raw
+	rm -f *.o
+	rm -f *.a
+	rm -f *.so
+	rm -rf *.dSYM
+
+ndif2raw: ndif2raw.c appledouble.c resourcefork.c logger.c
+ifeq ($(shell uname), Darwin)
+	$(CC) -o $@ $^ -Wno-deprecated-declarations -framework CoreServices
+else
+	$(CC) -o $@ $^
+endif
