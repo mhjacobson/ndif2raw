@@ -4,17 +4,23 @@
  * date: September 2024
  */
 
+#include "appledouble.h"
+#include "logger.h"
+#include "resourcefork.h"
+
 #include <assert.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <getopt.h>
 
 #define READ_8(buf) (*(buf++))
 #define READ_BE_16(buf) (buf += 2, ((buf[-2] << 8) | buf[-1]))
 #define READ_BE_24(buf) (buf += 3, ((buf[-3] << 16) | (buf[-2] << 8) | buf[-1]))
 #define READ_BE_32(buf) (buf += 4, ((buf[-4] << 24) | (buf[-3] << 16) | (buf[-2] << 8) | buf[-1]))
+#define FOURCC(a, b, c, d) ((uint32_t)(a) << 24 | (uint32_t)(b) << 16 | (uint32_t)(c) << 8 | (uint32_t)(d))
 
 #ifndef DEBUG_ADC
 #define DEBUG_ADC 0
@@ -367,33 +373,6 @@ uint8_t *read_data(FILE *const fp, size_t *const size_out) {
     return buffer;
 }
 
-// TODO: provide a non-Macintosh implementation
-#include <MacTypes.h>
-#include <CoreServices/CoreServices.h>
-uint8_t *read_resource(const char *const file, const ResType type, const ResID id, size_t *const size_out) {
-    OSStatus err;
-    FSRef ref;
-
-    err = FSPathMakeRef((UInt8 *)file, &ref, NULL);
-    assert(err == noErr);
-
-    const ResFileRefNum rsrc = FSOpenResFile(&ref, fsRdPerm);
-    UseResFile(rsrc);
-    const Handle handle = GetResource(type, id);
-    assert(handle);
-    const Size size = GetHandleSize(handle);
-
-    uint8_t *const buffer = malloc(size);
-    assert(buffer);
-    memcpy(buffer, *handle, size);
-
-    ReleaseResource(handle);
-    CloseResFile(rsrc);
-
-    if (size_out) *size_out = size;
-    return buffer;
-}
-
 const uint8_t *read_header(struct ndif_header *const header, const uint8_t *buf) {
     header->version = READ_BE_16(buf);
     header->fsid = READ_BE_16(buf);
@@ -452,14 +431,56 @@ uint32_t crc_calc(uint32_t crc, const uint8_t *buf, const size_t buflen) {
     return crc;
 }
 
-int main(int argc, const char *argv[]) {
-    if (argc != 3) {
-        fprintf(stderr, "usage:\n\tndif2raw <input NDIF path> <output raw path>\n");
+int main(const int argc, char *argv[]) {
+    enum {
+        FORMAT_RESOURCE_FORK,
+        FORMAT_APPLEDOUBLE,
+        FORMAT_APPLESINGLE,
+    } format = FORMAT_RESOURCE_FORK;
+    int overwrite = 0;
+    int opt;
+
+    struct option long_options[] = {
+        {"force", no_argument, 0, 'F'},
+        {"verbose", no_argument, 0, 'v'},
+        {"format", required_argument, 0, 'f'},
+        {0, 0, 0, 0}
+    };
+
+    while ((opt = getopt_long(argc, argv, "Fvf:", long_options, NULL)) != -1) {
+        switch (opt) {
+            case 'F':
+                overwrite = 1;
+                break;
+            case 'v':
+                logging_enabled = true;
+                break;
+            case 'f':
+                if (!strcmp(optarg, "resource-fork")) {
+                    format = FORMAT_RESOURCE_FORK;
+                } else if (!strcmp(optarg, "appledouble")) {
+                    format = FORMAT_APPLEDOUBLE;
+                } else if (!strcmp(optarg, "applesingle")) {
+                    format = FORMAT_APPLESINGLE;
+                } else {
+                    fprintf(stderr, "ERROR: unrecognized format (options are: resource-fork, appledouble, applesingle)\n");
+                    return 1;
+                }
+
+                break;
+            default:
+                fprintf(stderr, "usage:\n\tndif2raw [--force] [--verbose] [--format=<format>] <input NDIF path> <output raw path>\n");
+                return 1;
+        }
+    }
+
+    if (optind + 2 != argc) {
+        fprintf(stderr, "usage:\n\tndif2raw [--force] [--verbose] [--format=<format>] <input NDIF path> <output raw path>\n");
         return 1;
     }
 
-    const char *const in_path = argv[1];
-    const char *const out_path = argv[2];
+    const char *in_path = argv[optind];
+    const char *out_path = argv[optind + 1];
     FILE *input, *output;
 
     input = fopen(in_path, "r");
@@ -472,7 +493,7 @@ int main(int argc, const char *argv[]) {
     if (!strcmp(out_path, "-")) {
         output = stdout;
     } else {
-        output = fopen(out_path, "wx");
+        output = fopen(out_path, overwrite ? "w" : "wx");
 
         if (output == NULL) {
             perror("cannot open output file");
@@ -481,13 +502,29 @@ int main(int argc, const char *argv[]) {
     }
 
     size_t dsize, rsize;
-    size_t n;
-    uint8_t *const dbuffer = read_data(input, &dsize);
-    uint8_t *const rbuffer = read_resource(in_path, 'bcem', 128, &rsize);
-    const uint8_t *rbuf = rbuffer;
+    uint8_t *dbuffer, *rbuffer;
+
+    if (format == FORMAT_RESOURCE_FORK) {
+        dbuffer = read_data(input, &dsize);
+        rbuffer = read_resource_fork(in_path, FOURCC('b','c','e','m'), 128, &rsize);
+    } else if (format == FORMAT_APPLEDOUBLE) {
+        dbuffer = read_data(input, &dsize);
+        rbuffer = read_appledouble_resource(in_path, FOURCC('b','c','e','m'), 128, &rsize);
+    } else if (format == FORMAT_APPLESINGLE) {
+        dbuffer = read_applesingle_data(in_path, &dsize);
+        rbuffer = read_applesingle_resource(in_path, FOURCC('b','c','e','m'), 128, &rsize);
+    } else {
+        abort();
+    }
+
+    if (!dbuffer || !rbuffer) {
+        fprintf(stderr, "ERROR: could not convert NDIF image\n");
+        return 1;
+    }
 
     assert(rsize >= sizeof (struct ndif_header));
     struct ndif_header header;
+    const uint8_t *rbuf = rbuffer;
     rbuf = read_header(&header, rbuf);
 
     switch (header.version) {
@@ -569,6 +606,7 @@ int main(int argc, const char *argv[]) {
         // Write out a block.
         assert(i >= chunk->logical_offset);
         const size_t block_offset = i - chunk->logical_offset;
+        size_t n;
 
         switch (chunk_type) {
             case NDIF_CHUNK_ZERO:
@@ -598,4 +636,6 @@ int main(int argc, const char *argv[]) {
     free(chunkbuf);
     free(rbuffer);
     free(dbuffer);
+
+    return 0;
 }
