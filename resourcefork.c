@@ -11,7 +11,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#ifdef __ENVIRONMENT_MAC_OS_X_VERSION_MIN_REQUIRED__
+#ifdef NDIF2RAW_HAS_CORESERVICES
 #include <CoreServices/CoreServices.h>
 
 uint8_t *read_resource_fork(const char *const filename, const ResType type, const ResID id, size_t *const size_out) {
@@ -38,11 +38,11 @@ uint8_t *read_resource_fork(const char *const filename, const ResType type, cons
     return buffer;
 }
 
-#else /* __ENVIRONMENT_MAC_OS_X_VERSION_MIN_REQUIRED__ */
+#else /* NDIF2RAW_HAS_CORESERVICES */
 
 uint8_t *read_resource_fork(const char *const filename, const ResType type, const ResID id, size_t *const size_out) {
     fprintf(stderr, "ERROR: reading a Macintosh resource fork is not supported on this machine\n");
     return NULL;
 }
 
-#endif /* __ENVIRONMENT_MAC_OS_X_VERSION_MIN_REQUIRED__ */
+#endif /* NDIF2RAW_HAS_CORESERVICES */

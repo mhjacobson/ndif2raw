@@ -9,7 +9,7 @@ clean:
 
 ndif2raw: ndif2raw.c appledouble.c resourcefork.c logger.c
 ifeq ($(shell uname), Darwin)
-	$(CC) -o $@ $^ -Wno-deprecated-declarations -framework CoreServices
+	$(CC) -o $@ $^ -Wno-deprecated-declarations -DNDIF2RAW_HAS_CORESERVICES -framework CoreServices
 else
 	$(CC) -o $@ $^
 endif
